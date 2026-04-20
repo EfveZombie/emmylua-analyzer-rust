@@ -5,7 +5,7 @@ use emmylua_parser::{
     LuaLiteralToken,
 };
 
-use crate::{DbIndex, DiagnosticCode, LuaSignatureId, LuaType, SemanticModel};
+use crate::{DbIndex, DiagnosticCode, LuaSignatureId, LuaType, SemanticModel, VariadicType};
 
 use super::{Checker, DiagnosticContext};
 
@@ -182,6 +182,36 @@ fn check_call_expr(
             min_call_args_count = min_call_args_count.saturating_sub(1);
         }
 
+        // 检查最后一个参数是否是多返回值函数调用（如 table.unpack()）。
+        // 多返回值调用在最后一个参数位置时会展开，需要根据其最小保证返回值数量来判断：
+        // - Variadic(Base(T))（纯 T...）：最小返回 0 个值，可以安全跳过
+        // - Variadic(Multi([A, B, ...]))（如 (boolean, T...)）：至少返回固定部分的值
+        // 将最后一个参数替换为其最小保证返回值数量后，再判断是否超出形参数量。
+        let last_arg_is_multi_return = if let Some(last_arg) = call_args.last()
+            && !last_arg_is_dots
+            && matches!(last_arg, LuaExpr::CallExpr(_))
+            && let Ok(inferred) = semantic_model.infer_expr(last_arg.clone())
+            && let LuaType::Variadic(variadic) = &inferred
+        {
+            // 计算多返回值调用的最小保证返回值数量
+            let min_returns = match variadic.as_ref() {
+                // 纯 T...：可能返回 0 个值
+                VariadicType::Base(_) => 0,
+                // (A, B, ..., T...)：至少返回非尾部 variadic 的固定元素数量
+                VariadicType::Multi(types) => {
+                    let fixed_count = types.iter().take_while(|t| !matches!(t, LuaType::Variadic(_))).count();
+                    fixed_count
+                }
+            };
+            // 将最后一个参数替换为其最小保证返回值数量
+            // 例如 f(x, g()) 中 g 返回 (boolean, T...)：
+            //   min_call_args_count = 2 - 1 + 1 = 2（x + 至少一个 boolean）
+            min_call_args_count = min_call_args_count.saturating_sub(1) + min_returns;
+            true
+        } else {
+            false
+        };
+
         if min_call_args_count <= fake_params.len() {
             return Some(());
         }
@@ -198,8 +228,13 @@ fn check_call_expr(
             adjusted_index = if colon_define && !colon_call { -1 } else { 1 };
         }
 
+        // 仅当多返回值展开后参数数量不超过形参数量时，才跳过最后一个参数的检查。
+        // 例如 f(a) 调用 f(x, g()) 且 g 返回 (boolean, T...) 时，
+        // min_call_args_count = 2 > fake_params.len() = 1，不应跳过 g()。
+        let skip_last_arg = last_arg_is_dots
+            || (last_arg_is_multi_return && min_call_args_count <= fake_params.len());
         for (i, arg) in call_args.iter().enumerate() {
-            if last_arg_is_dots && i + 1 == call_args.len() {
+            if skip_last_arg && i + 1 == call_args.len() {
                 continue;
             }
 
