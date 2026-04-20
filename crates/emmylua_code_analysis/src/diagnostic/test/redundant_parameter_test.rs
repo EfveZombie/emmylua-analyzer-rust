@@ -176,4 +176,88 @@ mod test {
         "#
         ));
     }
+
+    #[test]
+    fn test_last_arg_multi_return_call() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        // last arg is a multi-return function call (table.unpack), should not report redundant-parameter
+        assert!(ws.check_code_for(
+            DiagnosticCode::RedundantParameter,
+            r#"
+            ---@param args table
+            local function f(args) end
+
+            ---@type any[]
+            local cmds = {}
+            f(cmds, table.unpack(cmds))
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_last_arg_multi_return_call_params_match() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        // f takes 2 params, g() returns (boolean, T...), last arg g() fills ok + extra
+        // should NOT report redundant-parameter since params can be satisfied
+        assert!(ws.check_code_for(
+            DiagnosticCode::RedundantParameter,
+            r#"
+            ---@param args table
+            ---@param ok boolean
+            local function f(args, ok) end
+
+            ---@generic T
+            ---@return boolean, T...
+            local function g(t) end
+
+            ---@type any[]
+            local cmds = {}
+            f(cmds, g(cmds))
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_last_arg_multi_return_call_too_many() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        // f takes 1 param, g() returns (boolean, T...), call has 2 args -> should warn
+        assert!(!ws.check_code_for(
+            DiagnosticCode::RedundantParameter,
+            r#"
+            ---@param args table
+            local function f(args) end
+
+            ---@generic T
+            ---@return boolean, T...
+            local function g(t) end
+
+            ---@type any[]
+            local cmds = {}
+            f(cmds, g(cmds))
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_last_arg_multi_return_call_with_alias() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        // table.unpack aliased to a local variable, should not report redundant-parameter
+        assert!(ws.check_code_for(
+            DiagnosticCode::RedundantParameter,
+            r#"
+            local tunpack = table.unpack
+
+            ---@param args table
+            local function f(args) end
+
+            ---@type any[]
+            local cmds = {}
+            f(cmds, tunpack(cmds, 2))
+        "#
+        ));
+    }
 }
